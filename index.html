@@ -40,10 +40,12 @@ body {
 }
 #hud { display: flex; align-items: center; gap: 8px; }
 #hud h1 {
-  flex: 1; margin: 0; text-align: center;
-  font-family: var(--font-display); font-weight: 800; font-size: 1.6rem;
+  flex: 1; min-width: 0; margin: 0; text-align: center;
+  font-family: var(--font-display); font-weight: 800; font-size: clamp(1.15rem, 5.5vw, 1.6rem);
   letter-spacing: .02em; color: var(--ink); line-height: 1;
 }
+#hud h1 span { display: block; }
+#hud h1 small, #hud h1 span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #hud h1 small { display: block; font-family: var(--font-body); font-size: .72rem; color: var(--ink-soft); letter-spacing: .08em; text-transform: uppercase; }
 .btn {
   font: 800 .95rem var(--font-body);
@@ -76,14 +78,16 @@ canvas { display: block; width: 100%; height: 100%; }
 }
 .card h2 { margin: 0; font-family: var(--font-display); font-size: 2rem; line-height: 1; }
 .card p { margin: 0; color: var(--ink-soft); }
+.stars { font-size: 2.2rem; line-height: 1; color: var(--accent); letter-spacing: .08em; }
 @media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
 </style>
 
 <div id="app">
   <div id="hud">
     <button class="btn" id="restart" aria-label="Recommencer le niveau">↻</button>
-    <h1><small>Sortie de Bus</small><span id="lvl">Niveau 1</span></h1>
-    <button class="btn hot" id="bonus" aria-label="Ajouter une place d'attente">+1 place</button>
+    <h1><small id="sub">Sortie de Bus</small><span id="lvl">Niveau 1</span></h1>
+    <button class="btn" id="daily" aria-label="Défi du jour">Défi</button>
+    <button class="btn hot" id="bonus" aria-label="Ajouter une place d'attente" title="Ajouter une place d'attente">+1</button>
   </div>
   <div id="stage">
     <canvas id="cv"></canvas>
@@ -91,6 +95,7 @@ canvas { display: block; width: 100%; height: 100%; }
     <div class="overlay" id="winBox" hidden>
       <div class="card">
         <h2>Bravo !</h2>
+        <div id="winStars" class="stars" aria-label="Étoiles gagnées">★★★</div>
         <p id="winTxt">Tous les passagers sont partis.</p>
         <button class="btn hot" id="next">Niveau suivant</button>
       </div>
@@ -153,17 +158,24 @@ function pathOf(b, rows, cols) {
 // Buses are placed one by one; each new bus must have a clear path to the edge
 // given the buses already placed. Exiting in reverse placement order therefore
 // always works, so every level is solvable.
-function genLevel(level) {
-  const R = rng(level * 9973 + 17);
+function genLevel(level, seed) {
+  const R = rng(seed == null ? level * 9973 + 17 : seed);
   const cols = Math.min(5 + Math.floor((level - 1) / 3), 8);
   const rows = Math.min(6 + Math.floor((level - 1) / 2), 10);
   const nColors = Math.min(3 + Math.floor((level - 1) / 2), COLORS.length);
-  const win = level < 3 ? 2 : 3;
+  const win = level < 3 ? 2 : level < 8 ? 3 : 4;
   const longP = Math.min(0.15 + level * 0.03, 0.4);
   const occ = Array.from({ length: rows }, () => Array(cols).fill(-1));
+  // cones: cells no bus can use or drive through
+  const cones = [];
+  const nCones = level >= 6 ? Math.min(1 + Math.floor((level - 6) / 4), 4) : 0;
+  for (let k = 0; k < nCones; k++) {
+    const r = Math.floor(R() * rows), c = Math.floor(R() * cols);
+    if (occ[r][c] === -1) { occ[r][c] = -2; cones.push([r, c]); }
+  }
   const buses = [];
-  const target = Math.floor(rows * cols / 2.25);
-  for (let a = 0; a < 8000 && buses.length < target; a++) {
+  const target = Math.floor(rows * cols / (level < 5 ? 2.25 : 2));
+  for (let a = 0; a < 12000 && buses.length < target; a++) {
     const len = R() < longP ? 3 : 2;
     const vert = R() < 0.62;
     const dir = vert ? (R() < 0.7 ? 'U' : 'D') : (R() < 0.5 ? 'L' : 'R');
@@ -182,15 +194,23 @@ function genLevel(level) {
     b.color = used[(i + Math.floor(R() * nColors)) % nColors];
     b.cap = b.len === 3 ? 6 : 4;
   });
-  // passengers: exit order = reverse placement; mix passengers inside windows of `win` buses
+  // mystery buses stay grey until their lane is clear
+  if (level >= 4) {
+    const p = Math.min(0.15 + (level - 4) * 0.02, 0.35);
+    buses.forEach(b => { b.mystery = R() < p; });
+  }
+  // exit order = reverse placement
   const order = buses.slice().reverse();
+  // frozen buses need `ice` departures first; ice <= position in the exit order keeps it solvable
+  if (level >= 9) order.forEach((b, i) => { if (i >= 2 && R() < 0.12) b.ice = Math.min(3, i); });
+  // passengers: mix passengers inside windows of `win` buses
   const queue = [];
   for (let i = 0; i < order.length; i += win) {
     const group = [];
     order.slice(i, i + win).forEach(b => { for (let k = 0; k < b.cap; k++) group.push(b.color); });
     queue.push(...shuffle(group, R));
   }
-  return { rows, cols, buses, queue, solution: order.map(b => b.id) };
+  return { rows, cols, buses, cones, queue, solution: order.map(b => b.id) };
 }
 function shuffle(a, R) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
@@ -207,19 +227,34 @@ let S = null;
 function load(key, dflt) { try { const v = localStorage.getItem(key); return v == null ? dflt : JSON.parse(v); } catch (e) { return dflt; } }
 function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
 
-function startLevel(level) {
-  const g = genLevel(level);
+const DAILY_LEVEL = 14;
+function todayKey() { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function totalStars() { const m = load('sdb-stars', {}); return Object.values(m).reduce((a, b) => a + b, 0); }
+function refreshSub() { $('sub').textContent = 'Sortie de Bus · ★ ' + totalStars(); }
+
+function startLevel(level, daily) {
+  const g = daily ? genLevel(DAILY_LEVEL, todayKey()) : genLevel(level);
   S = {
-    level, rows: g.rows, cols: g.cols, solution: g.solution,
-    buses: g.buses.map(b => ({ ...b, state: 'park', riders: 0, pending: 0, slot: -1, shake: 0, bump: null, x: 0, y: 0, ang: 0, k: 0 })),
+    level, daily: !!daily, rows: g.rows, cols: g.cols, solution: g.solution, cones: g.cones,
+    departed: 0, misses: 0,
+    buses: g.buses.map(b => ({ ...b, ice: b.ice || 0, mystery: !!b.mystery, state: 'park', riders: 0, pending: 0, slot: -1, shake: 0, bump: null, x: 0, y: 0, ang: 0, k: 0 })),
     queue: g.queue.slice(), total: g.queue.length,
     slots: Array(MAX_SLOTS).fill(null), active: BASE_SLOTS, bonusUsed: false,
     flying: [], nextBoard: 0, qOff: 0, over: false, endAt: 0, t0: performance.now(),
   };
-  $('lvl').textContent = 'Niveau ' + level;
+  $('lvl').textContent = daily ? 'Défi du jour' : 'Niveau ' + level;
   $('winBox').hidden = true; $('loseBox').hidden = true;
   $('bonus').disabled = false;
-  save('sdb-level', level);
+  $('daily').textContent = daily ? 'Niveaux' : 'Défi';
+  if (!daily) save('sdb-level', level);
+  refreshSub();
+}
+function starsFor() {
+  let st = 3;
+  if (S.misses >= 2) st--;
+  if (S.misses >= 5) st--;
+  if (S.bonusUsed) st--;
+  return Math.max(1, st);
 }
 
 // ---------- Layout ----------
@@ -271,23 +306,31 @@ cv.addEventListener('pointerdown', e => {
 function occupancy() {
   const occ = Array.from({ length: S.rows }, () => Array(S.cols).fill(null));
   S.buses.forEach(b => { if (b.state === 'park') cellsOf(b).forEach(([y, x]) => (occ[y][x] = b)); });
+  S.cones.forEach(([y, x]) => (occ[y][x] = 'cone'));
   return occ;
 }
 
 function tap(b) {
   if (b.bump) return;
+  if (b.ice > S.departed) {
+    b.shake = 0.4; S.misses++;
+    const n = b.ice - S.departed;
+    toast(n > 1 ? `Bus gelé : encore ${n} départs` : 'Bus gelé : encore 1 départ');
+    return;
+  }
   const occ = occupancy();
   const path = pathOf(b, S.rows, S.cols);
   let free = 0, blocker = null;
   for (const [y, x] of path) { if (occ[y][x]) { blocker = occ[y][x]; break; } free++; }
   if (blocker) {
     b.bump = { t: 0, dur: 0.32, dist: free * L.cs + L.cs * 0.1 };
-    setTimeout(() => { blocker.shake = 0.35; }, 120);
+    S.misses++;
+    if (blocker !== 'cone') setTimeout(() => { blocker.shake = 0.35; }, 120);
     return;
   }
   const j = S.slots.findIndex((s, i) => i < S.active && s === null);
-  if (j < 0) { b.shake = 0.4; toast('Toutes les places sont prises'); return; }
-  S.slots[j] = b; b.slot = j;
+  if (j < 0) { b.shake = 0.4; S.misses++; toast('Toutes les places sont prises'); return; }
+  S.slots[j] = b; b.slot = j; b.mystery = false; S.departed++;
   const p = parkPose(b);
   b.x = p.x; b.y = p.y; b.ang = p.ang; b.state = 'drive'; b.k = 0;
   b.from = { len: p.len, wid: p.wid };
@@ -331,7 +374,16 @@ function frontPos() { return { x: queueX(0), y: L.qY }; }
 function queueSpacing() { return Math.max(14, Math.min(22, W / 22)); }
 function queueX(i) { return 22 + i * queueSpacing() + S.qOff; }
 
+function revealMystery() {
+  if (!S.buses.some(b => b.mystery && b.state === 'park')) return;
+  const occ = occupancy();
+  for (const b of S.buses) if (b.mystery && b.state === 'park') {
+    if (pathOf(b, S.rows, S.cols).every(([y, x]) => !occ[y][x])) b.mystery = false;
+  }
+}
+
 function update(dt, now) {
+  revealMystery();
   S.qOff *= Math.pow(0.0001, dt);
   if (Math.abs(S.qOff) < 0.2) S.qOff = 0;
   for (const b of S.buses) {
@@ -389,9 +441,20 @@ function checkEnd(now) {
   if (S.over) return;
   if (!S.queue.length && !S.flying.length && S.buses.every(b => b.state === 'gone' || b.state === 'leave')) {
     S.over = true;
+    const st = starsFor();
+    if (!S.daily) {
+      save('sdb-level', S.level + 1);
+      const m = load('sdb-stars', {});
+      m[S.level] = Math.max(m[S.level] || 0, st);
+      save('sdb-stars', m);
+    }
     setTimeout(() => {
       const secs = Math.round((performance.now() - S.t0) / 1000);
-      $('winTxt').textContent = `${S.total} passagers transportés en ${secs} s.`;
+      $('winStars').textContent = '★'.repeat(st) + '☆'.repeat(3 - st);
+      const miss = S.misses === 0 ? 'aucun coup raté' : S.misses === 1 ? '1 coup raté' : `${S.misses} coups ratés`;
+      $('winTxt').textContent = `${S.total} passagers en ${secs} s, ${miss}.`;
+      $('next').textContent = S.daily ? 'Retour aux niveaux' : 'Niveau suivant';
+      refreshSub();
       $('winBox').hidden = false; $('next').focus();
     }, 650);
     return;
@@ -416,8 +479,9 @@ function rr(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
+const MYSTERY = { c: '#8d96a3', d: '#5f6875', l: '#b7bfca' };
 function drawBus(x, y, ang, len, wid, col, opt) {
-  const P = COLORS[col];
+  const P = col < 0 ? MYSTERY : COLORS[col];
   ctx.save();
   ctx.translate(x, y); ctx.rotate(ang);
   const r = wid * 0.28;
@@ -470,11 +534,50 @@ function drawBus(x, y, ang, len, wid, col, opt) {
     ctx.lineTo(-aw / 2, cy - ah / 2 + aw * 0.55);
     ctx.closePath(); ctx.fill();
   }
+  if (col < 0) {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `800 ${Math.round(wid * 0.42)}px Nunito, system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.save(); ctx.translate(0, len / 2 - wid * 0.42); ctx.rotate(-ang);
+    ctx.fillText('?', 0, 0); ctx.restore();
+    ctx.textBaseline = 'alphabetic';
+  }
+  if (opt.ice > 0) {
+    ctx.fillStyle = 'rgba(200,236,255,.45)';
+    rr(-wid / 2 - 2, -len / 2 - 2, wid + 4, len + 4, wid * 0.3); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 2;
+    for (const a of [0, Math.PI / 3, -Math.PI / 3]) {
+      ctx.beginPath(); ctx.moveTo(-Math.sin(a) * wid * 0.3, -Math.cos(a) * wid * 0.3);
+      ctx.lineTo(Math.sin(a) * wid * 0.3, Math.cos(a) * wid * 0.3); ctx.stroke();
+    }
+    ctx.translate(0, len / 2 - wid * 0.4);
+    ctx.rotate(-ang);
+    ctx.fillStyle = '#1d6fa5';
+    ctx.beginPath(); ctx.arc(0, 0, wid * 0.24, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `800 ${Math.round(wid * 0.3)}px Nunito, system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(opt.ice), 0, 1);
+    ctx.textBaseline = 'alphabetic';
+    ctx.restore();
+    return;
+  }
   // headlights
   ctx.fillStyle = '#fff6c2';
   ctx.fillRect(-wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05);
   ctx.fillRect(wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05);
   ctx.restore();
+}
+
+function drawCone(x, y, cs) {
+  const s = cs * 0.34;
+  ctx.fillStyle = 'rgba(15,25,40,.22)';
+  ctx.beginPath(); ctx.ellipse(x + 2, y + s * 0.95, s * 1.05, s * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#3a4250'; rr(x - s, y + s * 0.6, s * 2, s * 0.4, 3); ctx.fill();
+  ctx.fillStyle = '#ff7a1a';
+  ctx.beginPath(); ctx.moveTo(x, y - s * 1.2); ctx.lineTo(x + s * 0.72, y + s * 0.65); ctx.lineTo(x - s * 0.72, y + s * 0.65); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.moveTo(x - s * 0.34, y - s * 0.25); ctx.lineTo(x + s * 0.34, y - s * 0.25); ctx.lineTo(x + s * 0.47, y + s * 0.1); ctx.lineTo(x - s * 0.47, y + s * 0.1); ctx.closePath(); ctx.fill();
 }
 
 function drawPerson(x, y, s, col, lift) {
@@ -515,6 +618,8 @@ function drawScene(now) {
   for (let c = 0; c <= S.cols; c++) { const x = L.gx0 + c * L.cs; ctx.beginPath(); ctx.moveTo(x, L.gy0); ctx.lineTo(x, L.gy1); ctx.stroke(); }
   for (let r = 0; r <= S.rows; r++) { const y = L.gy0 + r * L.cs; ctx.beginPath(); ctx.moveTo(L.gx0, y); ctx.lineTo(L.gx1, y); ctx.stroke(); }
 
+  // cones
+  for (const [r, c] of S.cones) drawCone(L.gx0 + (c + 0.5) * L.cs, L.gy0 + (r + 0.5) * L.cs, L.cs);
   // slots
   for (let j = 0; j < MAX_SLOTS; j++) {
     const s = slotCenter(j);
@@ -544,8 +649,8 @@ function drawScene(now) {
       const v = DIR_VEC[b.dir], k = Math.sin(Math.PI * b.bump.t / b.bump.dur);
       x += v[0] * b.bump.dist * k; y += v[1] * b.bump.dist * k;
     }
-    if (b.shake > 0) { const a = Math.sin(now / 22) * 3 * (b.shake / 0.4); x += a; }
-    drawBus(x, y, p.ang, p.len, p.wid, b.color, {});
+    if (b.shake > 0) { const a = Math.sin(now / 22) * 3 * (Math.min(b.shake, 0.4) / 0.4); x += a; }
+    drawBus(x, y, p.ang, p.len, p.wid, b.mystery ? -1 : b.color, { ice: Math.max(0, b.ice - S.departed) });
   }
   // buses in slots
   for (const b of S.buses) if (b.state === 'slot') {
@@ -598,9 +703,10 @@ function frame(now) {
 }
 
 // ---------- Buttons ----------
-$('restart').onclick = () => { startLevel(S.level); layout(); };
-$('retry').onclick = () => { startLevel(S.level); layout(); };
-$('next').onclick = () => { startLevel(S.level + 1); layout(); };
+$('restart').onclick = () => { startLevel(S.level, S.daily); layout(); };
+$('retry').onclick = () => { startLevel(S.level, S.daily); layout(); };
+$('next').onclick = () => { startLevel(S.daily ? Math.max(1, load('sdb-level', 1) | 0) : S.level + 1); layout(); };
+$('daily').onclick = () => { if (S.daily) startLevel(Math.max(1, load('sdb-level', 1) | 0)); else startLevel(DAILY_LEVEL, true); layout(); };
 function useBonus() {
   if (S.bonusUsed) return false;
   S.bonusUsed = true; S.active = MAX_SLOTS; $('bonus').disabled = true;

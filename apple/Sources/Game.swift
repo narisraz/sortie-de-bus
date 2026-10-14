@@ -61,6 +61,7 @@ final class Bus {
     var slot = -1
     var mystery = false
     var ice = 0
+    var model = "urbain"
     var shake = 0.0
     var bumpT = -1.0
     var bumpDist = 0.0
@@ -168,6 +169,13 @@ func generateLevel(_ level: Int, seed: Int? = nil) -> Level {
     return Level(rows: rows, cols: cols, buses: buses, queue: queue, solution: order.map { $0.id }, cones: cones)
 }
 
+// Bus models are cosmetic only; picked from the bus id so no RNG call is added to the generator.
+let models2 = ["minibus", "scolaire", "navette"], models3 = ["urbain", "articule", "imperiale", "autocar"]
+func modelFor(_ b: Bus, level: Int) -> String {
+    let m = b.len == 3 ? models3 : models2
+    return m[(b.id * 7 + level * 3) % m.count]
+}
+
 final class Flyer {
     let color: Int, x0: Double, y0: Double
     let to: Bus
@@ -246,6 +254,7 @@ final class Game {
         daily = dailySeed != nil
         let g = dailySeed.map { generateLevel(dailyLevel, seed: $0) } ?? generateLevel(lv)
         rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution; cones = g.cones
+        for b in buses { b.model = modelFor(b, level: daily ? dailyLevel : lv) }
         departed = 0; misses = 0
         queue = g.queue; total = g.queue.count
         slots = Array(repeating: nil, count: maxSlots); active = baseSlots; bonusUsed = false

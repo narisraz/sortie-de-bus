@@ -45,6 +45,7 @@ class Bus(val id: Int, val r: Int, val c: Int, val len: Int, val dir: Dir) {
     var slot = -1
     var mystery = false
     var ice = 0
+    var model = "urbain"
     var shake = 0.0
     var bumpT = -1.0
     var bumpDist = 0.0
@@ -134,6 +135,14 @@ fun generateLevel(level: Int, seed: Int? = null): Level {
     return Level(rows, cols, buses, queue, order.map { it.id }, cones)
 }
 
+// Bus models are cosmetic only; picked from the bus id so no RNG call is added to the generator.
+val MODELS2 = listOf("minibus", "scolaire", "navette")
+val MODELS3 = listOf("urbain", "articule", "imperiale", "autocar")
+fun modelFor(b: Bus, level: Int): String {
+    val m = if (b.len == 3) MODELS3 else MODELS2
+    return m[(b.id * 7 + level * 3) % m.size]
+}
+
 class Flyer(val color: Int, val x0: Double, val y0: Double, val to: Bus) {
     var t = 0.0
     val dur = 0.26
@@ -207,6 +216,7 @@ class Game(startLevel: Int) {
         daily = dailySeed != null
         val g = if (dailySeed != null) generateLevel(DAILY_LEVEL, dailySeed) else generateLevel(lv)
         rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution; cones = g.cones
+        buses.forEach { it.model = modelFor(it, if (daily) DAILY_LEVEL else lv) }
         departed = 0; misses = 0
         queue.clear(); queue.addAll(g.queue); total = g.queue.size
         slots.fill(null); active = BASE_SLOTS; bonusUsed = false

@@ -1,0 +1,9 @@
+build/
+captures/
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/local.properties
+apple/*.xcodeproj/xcuserdata
+apple/*.xcodeproj/project.xcworkspace/xcuserdata
+.DS_Store

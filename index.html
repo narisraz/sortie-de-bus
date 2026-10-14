@@ -1,0 +1,620 @@
+<title>Sortie de Bus</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&family=Nunito:wght@600;800&display=swap">
+<style>
+/* Layout: one-screen portrait game board; HUD bar on top, canvas fills the rest. Single sunny look by choice. */
+:root {
+  --sky: #cfe3f2;
+  --ink: #1d2a3a;
+  --ink-soft: #4a5b70;
+  --paper: #ffffff;
+  --accent: #ff8a1f;
+  --accent-ink: #5a2a00;
+  --shade: rgba(20, 35, 55, .55);
+  --font-display: "Baloo 2", "Trebuchet MS", system-ui, sans-serif;
+  --font-body: "Nunito", system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body {
+  background: var(--sky);
+  color: var(--ink);
+  font-family: var(--font-body);
+  overflow: hidden;
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+}
+#app {
+  height: 100%;
+  max-width: 540px;
+  margin: 0 auto;
+  display: flex; flex-direction: column;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 10px 12px;
+  box-sizing: border-box;
+  gap: 8px;
+}
+#hud { display: flex; align-items: center; gap: 8px; }
+#hud h1 {
+  flex: 1; margin: 0; text-align: center;
+  font-family: var(--font-display); font-weight: 800; font-size: 1.6rem;
+  letter-spacing: .02em; color: var(--ink); line-height: 1;
+}
+#hud h1 small { display: block; font-family: var(--font-body); font-size: .72rem; color: var(--ink-soft); letter-spacing: .08em; text-transform: uppercase; }
+.btn {
+  font: 800 .95rem var(--font-body);
+  border: 0; border-radius: 14px; padding: 9px 12px;
+  background: var(--paper); color: var(--ink);
+  box-shadow: 0 3px 0 rgba(0,0,0,.18);
+  cursor: pointer; min-width: 44px; min-height: 40px;
+}
+.btn:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(0,0,0,.18); }
+.btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.btn.hot { background: var(--accent); color: var(--accent-ink); }
+.btn[disabled] { opacity: .45; cursor: default; }
+#stage { position: relative; flex: 1; min-height: 0; border-radius: 22px; overflow: hidden; box-shadow: 0 6px 18px rgba(20,35,55,.18); }
+canvas { display: block; width: 100%; height: 100%; }
+#toast {
+  position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%);
+  background: var(--ink); color: var(--paper); font-weight: 800;
+  padding: 8px 14px; border-radius: 12px; pointer-events: none;
+  opacity: 0; transition: opacity .2s;
+}
+#toast.on { opacity: .92; }
+.overlay {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: var(--shade);
+}
+.card {
+  background: var(--paper); border-radius: 22px; padding: 22px 24px;
+  text-align: center; display: grid; gap: 12px; width: min(300px, 84%);
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
+}
+.card h2 { margin: 0; font-family: var(--font-display); font-size: 2rem; line-height: 1; }
+.card p { margin: 0; color: var(--ink-soft); }
+@media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
+</style>
+
+<div id="app">
+  <div id="hud">
+    <button class="btn" id="restart" aria-label="Recommencer le niveau">↻</button>
+    <h1><small>Sortie de Bus</small><span id="lvl">Niveau 1</span></h1>
+    <button class="btn hot" id="bonus" aria-label="Ajouter une place d'attente">+1 place</button>
+  </div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="toast"></div>
+    <div class="overlay" id="winBox" hidden>
+      <div class="card">
+        <h2>Bravo !</h2>
+        <p id="winTxt">Tous les passagers sont partis.</p>
+        <button class="btn hot" id="next">Niveau suivant</button>
+      </div>
+    </div>
+    <div class="overlay" id="loseBox" hidden>
+      <div class="card">
+        <h2>Bouchon !</h2>
+        <p>Plus de place libre et aucun bus pour le prochain passager.</p>
+        <button class="btn hot" id="loseBonus">Ajouter une place</button>
+        <button class="btn" id="retry">Réessayer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+// ---------- Palette ----------
+const COLORS = [
+  { c: '#f0453a', d: '#b02a22', l: '#ff8a80' }, // rouge
+  { c: '#2f80ed', d: '#1c56a8', l: '#7fb3ff' }, // bleu
+  { c: '#27ae60', d: '#1a7a43', l: '#7be0a5' }, // vert
+  { c: '#f7c325', d: '#c4910b', l: '#ffe27a' }, // jaune
+  { c: '#9b51e0', d: '#6b2fa6', l: '#c99bff' }, // violet
+  { c: '#ec4f9c', d: '#a8306b', l: '#ff9ccb' }, // rose
+  { c: '#1fc8db', d: '#108c9a', l: '#8af0fb' }, // cyan
+  { c: '#f2802c', d: '#b5561a', l: '#ffb57f' }, // orange
+];
+const MAX_SLOTS = 5, BASE_SLOTS = 4;
+
+// ---------- RNG ----------
+function rng(seed) {
+  return function () {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Geometry helpers ----------
+const isVert = d => d === 'U' || d === 'D';
+function cellsOf(b) {
+  const out = [];
+  for (let i = 0; i < b.len; i++) out.push(isVert(b.dir) ? [b.r + i, b.c] : [b.r, b.c + i]);
+  return out;
+}
+function pathOf(b, rows, cols) {
+  const out = [];
+  if (b.dir === 'U') for (let r = b.r - 1; r >= 0; r--) out.push([r, b.c]);
+  if (b.dir === 'D') for (let r = b.r + b.len; r < rows; r++) out.push([r, b.c]);
+  if (b.dir === 'L') for (let c = b.c - 1; c >= 0; c--) out.push([b.r, c]);
+  if (b.dir === 'R') for (let c = b.c + b.len; c < cols; c++) out.push([b.r, c]);
+  return out;
+}
+
+// ---------- Level generation ----------
+// Buses are placed one by one; each new bus must have a clear path to the edge
+// given the buses already placed. Exiting in reverse placement order therefore
+// always works, so every level is solvable.
+function genLevel(level) {
+  const R = rng(level * 9973 + 17);
+  const cols = Math.min(5 + Math.floor((level - 1) / 3), 8);
+  const rows = Math.min(6 + Math.floor((level - 1) / 2), 10);
+  const nColors = Math.min(3 + Math.floor((level - 1) / 2), COLORS.length);
+  const win = level < 3 ? 2 : 3;
+  const longP = Math.min(0.15 + level * 0.03, 0.4);
+  const occ = Array.from({ length: rows }, () => Array(cols).fill(-1));
+  const buses = [];
+  const target = Math.floor(rows * cols / 2.25);
+  for (let a = 0; a < 8000 && buses.length < target; a++) {
+    const len = R() < longP ? 3 : 2;
+    const vert = R() < 0.62;
+    const dir = vert ? (R() < 0.7 ? 'U' : 'D') : (R() < 0.5 ? 'L' : 'R');
+    const r = Math.floor(R() * (rows - (vert ? len - 1 : 0)));
+    const c = Math.floor(R() * (cols - (vert ? 0 : len - 1)));
+    const b = { r, c, len, dir };
+    if (cellsOf(b).some(([y, x]) => occ[y][x] !== -1)) continue;
+    if (pathOf(b, rows, cols).some(([y, x]) => occ[y][x] !== -1)) continue;
+    b.id = buses.length;
+    cellsOf(b).forEach(([y, x]) => (occ[y][x] = b.id));
+    buses.push(b);
+  }
+  // colours: pick from the level's colour set, avoid long runs of one colour
+  const used = shuffle(COLORS.map((_, i) => i), R).slice(0, nColors);
+  buses.forEach((b, i) => {
+    b.color = used[(i + Math.floor(R() * nColors)) % nColors];
+    b.cap = b.len === 3 ? 6 : 4;
+  });
+  // passengers: exit order = reverse placement; mix passengers inside windows of `win` buses
+  const order = buses.slice().reverse();
+  const queue = [];
+  for (let i = 0; i < order.length; i += win) {
+    const group = [];
+    order.slice(i, i + win).forEach(b => { for (let k = 0; k < b.cap; k++) group.push(b.color); });
+    queue.push(...shuffle(group, R));
+  }
+  return { rows, cols, buses, queue, solution: order.map(b => b.id) };
+}
+function shuffle(a, R) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+// ---------- State ----------
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W = 0, H = 0, DPR = 1, L = {};
+let S = null;
+
+function load(key, dflt) { try { const v = localStorage.getItem(key); return v == null ? dflt : JSON.parse(v); } catch (e) { return dflt; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
+
+function startLevel(level) {
+  const g = genLevel(level);
+  S = {
+    level, rows: g.rows, cols: g.cols, solution: g.solution,
+    buses: g.buses.map(b => ({ ...b, state: 'park', riders: 0, pending: 0, slot: -1, shake: 0, bump: null, x: 0, y: 0, ang: 0, k: 0 })),
+    queue: g.queue.slice(), total: g.queue.length,
+    slots: Array(MAX_SLOTS).fill(null), active: BASE_SLOTS, bonusUsed: false,
+    flying: [], nextBoard: 0, qOff: 0, over: false, endAt: 0, t0: performance.now(),
+  };
+  $('lvl').textContent = 'Niveau ' + level;
+  $('winBox').hidden = true; $('loseBox').hidden = true;
+  $('bonus').disabled = false;
+  save('sdb-level', level);
+}
+
+// ---------- Layout ----------
+function layout() {
+  const r = cv.getBoundingClientRect();
+  W = r.width; H = r.height; DPR = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  const qH = Math.max(46, Math.min(70, H * 0.085));
+  const sH = Math.max(86, Math.min(150, H * 0.17));
+  const top = 6;
+  L.qY = top + qH * 0.55;
+  L.sY0 = top + qH; L.sH = sH;
+  L.slotW = Math.min((W - 24) / MAX_SLOTS - 10, sH * 0.5);
+  L.slotGap = (W - L.slotW * MAX_SLOTS) / (MAX_SLOTS + 1);
+  const gy0 = L.sY0 + sH + 14, gh = H - gy0 - 10;
+  if (!S) return;
+  L.cs = Math.min((W - 16) / (S.cols + 0.9), gh / (S.rows + 0.9));
+  L.gx0 = (W - L.cs * S.cols) / 2;
+  L.gy0 = gy0 + Math.min(L.cs * 0.55, (gh - L.cs * S.rows) / 2);
+  L.gx1 = L.gx0 + L.cs * S.cols; L.gy1 = L.gy0 + L.cs * S.rows;
+  L.lane = L.cs * 0.42;
+}
+function slotCenter(j) {
+  return { x: L.slotGap + L.slotW / 2 + j * (L.slotW + L.slotGap), y: L.sY0 + L.sH / 2 };
+}
+const DIR_ANG = { U: 0, R: Math.PI / 2, D: Math.PI, L: -Math.PI / 2 };
+const DIR_VEC = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0] };
+function parkPose(b) {
+  const cs = L.cs;
+  const w = isVert(b.dir) ? cs : cs * b.len, h = isVert(b.dir) ? cs * b.len : cs;
+  return { x: L.gx0 + b.c * cs + w / 2, y: L.gy0 + b.r * cs + h / 2, ang: DIR_ANG[b.dir], len: b.len * cs - cs * 0.14, wid: cs * 0.8 };
+}
+function slotDims(b) {
+  const len = L.sH * (b.len === 3 ? 0.86 : 0.7);
+  return { len, wid: Math.min(L.slotW * 0.86, len * 0.5) };
+}
+
+// ---------- Input ----------
+cv.addEventListener('pointerdown', e => {
+  if (!S || S.over) return;
+  const r = cv.getBoundingClientRect();
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  const c = Math.floor((px - L.gx0) / L.cs), rr = Math.floor((py - L.gy0) / L.cs);
+  if (c < 0 || rr < 0 || c >= S.cols || rr >= S.rows) return;
+  const b = S.buses.find(b => b.state === 'park' && cellsOf(b).some(([y, x]) => y === rr && x === c));
+  if (b) tap(b);
+});
+
+function occupancy() {
+  const occ = Array.from({ length: S.rows }, () => Array(S.cols).fill(null));
+  S.buses.forEach(b => { if (b.state === 'park') cellsOf(b).forEach(([y, x]) => (occ[y][x] = b)); });
+  return occ;
+}
+
+function tap(b) {
+  if (b.bump) return;
+  const occ = occupancy();
+  const path = pathOf(b, S.rows, S.cols);
+  let free = 0, blocker = null;
+  for (const [y, x] of path) { if (occ[y][x]) { blocker = occ[y][x]; break; } free++; }
+  if (blocker) {
+    b.bump = { t: 0, dur: 0.32, dist: free * L.cs + L.cs * 0.1 };
+    setTimeout(() => { blocker.shake = 0.35; }, 120);
+    return;
+  }
+  const j = S.slots.findIndex((s, i) => i < S.active && s === null);
+  if (j < 0) { b.shake = 0.4; toast('Toutes les places sont prises'); return; }
+  S.slots[j] = b; b.slot = j;
+  const p = parkPose(b);
+  b.x = p.x; b.y = p.y; b.ang = p.ang; b.state = 'drive'; b.k = 0;
+  b.from = { len: p.len, wid: p.wid };
+  b.pts = buildPath(b, p);
+  b.seg = 0;
+}
+
+function buildPath(b, p) {
+  const s = slotCenter(b.slot);
+  const topLane = L.gy0 - L.lane;
+  const pts = [];
+  if (b.dir === 'U') pts.push([p.x, topLane]);
+  if (b.dir === 'L') pts.push([L.gx0 - L.lane, p.y], [L.gx0 - L.lane, topLane]);
+  if (b.dir === 'R') pts.push([L.gx1 + L.lane, p.y], [L.gx1 + L.lane, topLane]);
+  if (b.dir === 'D') {
+    const sx = p.x < W / 2 ? L.gx0 - L.lane : L.gx1 + L.lane;
+    pts.push([p.x, L.gy1 + L.lane], [sx, L.gy1 + L.lane], [sx, topLane]);
+  }
+  pts.push([s.x, topLane], [s.x, s.y]);
+  b.pathLen = 0;
+  let px = p.x, py = p.y;
+  pts.forEach(([x, y]) => { b.pathLen += Math.hypot(x - px, y - py); px = x; py = y; });
+  b.done = 0;
+  return pts;
+}
+
+let toastT = 0;
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 1300);
+}
+
+// ---------- Update ----------
+function angTo(a, target, step) {
+  let d = target - a;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return Math.abs(d) <= step ? target : a + Math.sign(d) * step;
+}
+function frontPos() { return { x: queueX(0), y: L.qY }; }
+function queueSpacing() { return Math.max(14, Math.min(22, W / 22)); }
+function queueX(i) { return 22 + i * queueSpacing() + S.qOff; }
+
+function update(dt, now) {
+  S.qOff *= Math.pow(0.0001, dt);
+  if (Math.abs(S.qOff) < 0.2) S.qOff = 0;
+  for (const b of S.buses) {
+    if (b.shake > 0) b.shake = Math.max(0, b.shake - dt);
+    if (b.bump) { b.bump.t += dt; if (b.bump.t >= b.bump.dur) b.bump = null; }
+    if (b.state === 'drive') {
+      const speed = L.cs * 17;
+      let move = speed * dt;
+      while (move > 0 && b.seg < b.pts.length) {
+        const [tx, ty] = b.pts[b.seg];
+        const dx = tx - b.x, dy = ty - b.y, d = Math.hypot(dx, dy);
+        if (d > 0.01) b.ang = angTo(b.ang, Math.atan2(dx, -dy), 16 * dt);
+        if (d <= move) { b.x = tx; b.y = ty; move -= d; b.done += d; b.seg++; }
+        else { b.x += dx / d * move; b.y += dy / d * move; b.done += move; move = 0; }
+      }
+      b.k = Math.min(1, b.done / b.pathLen);
+      if (b.seg >= b.pts.length) { b.state = 'slot'; b.ang = 0; b.k = 1; }
+    } else if (b.state === 'slot') {
+      b.ang = angTo(b.ang, 0, 10 * dt);
+    } else if (b.state === 'leave') {
+      b.vy = (b.vy || 0) + 1800 * dt;
+      b.y -= b.vy * dt;
+      if (b.y < -80) b.state = 'gone';
+    }
+  }
+  // flying passengers
+  for (const f of S.flying) {
+    f.t += dt;
+    if (f.t >= f.dur && !f.done) {
+      f.done = true;
+      const b = f.to; b.pending--; b.riders++;
+      if (b.riders >= b.cap) { b.state = 'leave'; S.slots[b.slot] = null; b.vy = 0; }
+    }
+  }
+  S.flying = S.flying.filter(f => !f.done);
+  // boarding
+  if (!S.over && S.queue.length && now >= S.nextBoard) {
+    const col = S.queue[0];
+    let best = null;
+    for (const b of S.slots) if (b && b.state === 'slot' && b.color === col && b.riders + b.pending < b.cap) {
+      if (!best || b.riders + b.pending > best.riders + best.pending) best = b;
+    }
+    if (best) {
+      const fp = frontPos();
+      S.queue.shift(); best.pending++;
+      S.qOff += queueSpacing();
+      S.flying.push({ color: col, x0: fp.x, y0: fp.y, to: best, t: 0, dur: 0.26 });
+      S.nextBoard = now + 75;
+    }
+  }
+  checkEnd(now);
+}
+
+function checkEnd(now) {
+  if (S.over) return;
+  if (!S.queue.length && !S.flying.length && S.buses.every(b => b.state === 'gone' || b.state === 'leave')) {
+    S.over = true;
+    setTimeout(() => {
+      const secs = Math.round((performance.now() - S.t0) / 1000);
+      $('winTxt').textContent = `${S.total} passagers transportés en ${secs} s.`;
+      $('winBox').hidden = false; $('next').focus();
+    }, 650);
+    return;
+  }
+  if (!S.queue.length || S.flying.length) return;
+  if (S.buses.some(b => b.state === 'drive')) return;
+  for (let j = 0; j < S.active; j++) if (!S.slots[j]) return;
+  const col = S.queue[0];
+  if (S.slots.some(b => b && b.color === col && b.riders + b.pending < b.cap)) return;
+  S.over = true;
+  setTimeout(() => {
+    $('loseBonus').hidden = S.bonusUsed;
+    $('loseBox').hidden = false;
+  }, 450);
+}
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function drawBus(x, y, ang, len, wid, col, opt) {
+  const P = COLORS[col];
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  const r = wid * 0.28;
+  // shadow
+  ctx.fillStyle = 'rgba(15,25,40,.25)';
+  rr(-wid / 2 + wid * 0.08, -len / 2 + wid * 0.14, wid, len, r); ctx.fill();
+  // body
+  ctx.fillStyle = P.d; rr(-wid / 2, -len / 2, wid, len, r); ctx.fill();
+  ctx.fillStyle = P.c; rr(-wid / 2, -len / 2, wid, len - wid * 0.1, r); ctx.fill();
+  // side windows
+  ctx.fillStyle = 'rgba(210,235,255,.85)';
+  const wl = len * 0.62, n = Math.max(2, Math.round(len / wid * 1.4));
+  const gap = wl / n;
+  for (let i = 0; i < n; i++) {
+    const yy = -len / 2 + len * 0.27 + i * gap;
+    rr(-wid / 2 + wid * 0.04, yy, wid * 0.09, gap * 0.7, 2); ctx.fill();
+    rr(wid / 2 - wid * 0.13, yy, wid * 0.09, gap * 0.7, 2); ctx.fill();
+  }
+  // windshield (front = up)
+  ctx.fillStyle = '#d9efff';
+  rr(-wid / 2 + wid * 0.12, -len / 2 + wid * 0.07, wid * 0.76, wid * 0.24, wid * 0.08); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.7)';
+  rr(-wid / 2 + wid * 0.18, -len / 2 + wid * 0.1, wid * 0.22, wid * 0.08, 2); ctx.fill();
+  // roof
+  ctx.fillStyle = P.l;
+  rr(-wid * 0.3, -len / 2 + wid * 0.42, wid * 0.6, len - wid * 0.62, wid * 0.14); ctx.fill();
+  if (opt.seats) {
+    const cap = opt.cap, cols2 = 2, rows2 = cap / 2;
+    const top = -len / 2 + wid * 0.5, avail = len - wid * 0.78;
+    const step = avail / rows2, rad = Math.min(wid * 0.13, step * 0.32);
+    for (let i = 0; i < cap; i++) {
+      const cx = (i % cols2 === 0 ? -1 : 1) * wid * 0.14, cy = top + step * (Math.floor(i / cols2) + 0.5);
+      ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+      ctx.fillStyle = i < opt.riders ? '#ffffff' : 'rgba(0,0,0,.22)';
+      ctx.fill();
+      if (i < opt.riders) { ctx.beginPath(); ctx.arc(cx, cy, rad * 0.5, 0, Math.PI * 2); ctx.fillStyle = P.d; ctx.fill(); }
+    }
+  } else {
+    // arrow
+    const aw = wid * 0.42, ah = Math.min(len * 0.55, wid * 1.2);
+    const cy = wid * 0.12;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(0, cy - ah / 2);
+    ctx.lineTo(aw / 2, cy - ah / 2 + aw * 0.55);
+    ctx.lineTo(aw * 0.17, cy - ah / 2 + aw * 0.55);
+    ctx.lineTo(aw * 0.17, cy + ah / 2);
+    ctx.lineTo(-aw * 0.17, cy + ah / 2);
+    ctx.lineTo(-aw * 0.17, cy - ah / 2 + aw * 0.55);
+    ctx.lineTo(-aw / 2, cy - ah / 2 + aw * 0.55);
+    ctx.closePath(); ctx.fill();
+  }
+  // headlights
+  ctx.fillStyle = '#fff6c2';
+  ctx.fillRect(-wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05);
+  ctx.fillRect(wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05);
+  ctx.restore();
+}
+
+function drawPerson(x, y, s, col, lift) {
+  const P = COLORS[col];
+  ctx.fillStyle = 'rgba(0,0,0,.18)';
+  ctx.beginPath(); ctx.ellipse(x, y + s * 1.05, s * 0.75, s * 0.25, 0, 0, Math.PI * 2); ctx.fill();
+  y -= lift || 0;
+  ctx.fillStyle = P.d;
+  rr(x - s * 0.62, y - s * 0.05, s * 1.24, s * 1.1, s * 0.5); ctx.fill();
+  ctx.fillStyle = P.c;
+  rr(x - s * 0.55, y - s * 0.05, s * 1.1, s * 0.95, s * 0.45); ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y - s * 0.55, s * 0.48, 0, Math.PI * 2);
+  ctx.fillStyle = P.c; ctx.fill();
+  ctx.beginPath(); ctx.arc(x - s * 0.15, y - s * 0.7, s * 0.14, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fill();
+}
+
+function drawScene(now) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // sidewalk / station
+  ctx.fillStyle = '#e8eef4'; ctx.fillRect(0, 0, W, L.sY0);
+  ctx.strokeStyle = 'rgba(80,100,130,.12)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 18) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, L.sY0); ctx.stroke(); }
+  // queue rope
+  ctx.strokeStyle = '#b8c4d2'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(10, L.qY + 13); ctx.lineTo(W - 10, L.qY + 13); ctx.stroke();
+  // bus bay
+  ctx.fillStyle = '#4b5565'; ctx.fillRect(0, L.sY0, W, L.sH);
+  ctx.fillStyle = '#5a6576'; ctx.fillRect(0, L.sY0, W, 4);
+  // parking lot
+  const lotTop = L.sY0 + L.sH;
+  ctx.fillStyle = '#b9c3cf'; ctx.fillRect(0, lotTop, W, H - lotTop);
+  ctx.fillStyle = '#f2c94c';
+  for (let x = 6; x < W; x += 26) ctx.fillRect(x, lotTop + 4, 14, 4);
+  ctx.fillStyle = '#cfd7e0';
+  rr(L.gx0 - 4, L.gy0 - 4, L.gx1 - L.gx0 + 8, L.gy1 - L.gy0 + 8, 10); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 1.5;
+  for (let c = 0; c <= S.cols; c++) { const x = L.gx0 + c * L.cs; ctx.beginPath(); ctx.moveTo(x, L.gy0); ctx.lineTo(x, L.gy1); ctx.stroke(); }
+  for (let r = 0; r <= S.rows; r++) { const y = L.gy0 + r * L.cs; ctx.beginPath(); ctx.moveTo(L.gx0, y); ctx.lineTo(L.gx1, y); ctx.stroke(); }
+
+  // slots
+  for (let j = 0; j < MAX_SLOTS; j++) {
+    const s = slotCenter(j);
+    const x = s.x - L.slotW / 2, y = L.sY0 + 8, h = L.sH - 16;
+    if (j < S.active) {
+      ctx.fillStyle = '#3a4250'; rr(x, y, L.slotW, h, 8); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+      rr(x + 3, y + 3, L.slotW - 6, h - 6, 6); ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,.1)'; rr(x, y, L.slotW, h, 8); ctx.fill();
+      // padlock
+      const lx = s.x, ly = s.y;
+      ctx.strokeStyle = '#d4dae3'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(lx, ly - 6, 7, Math.PI, 0); ctx.stroke();
+      ctx.fillStyle = '#d4dae3'; rr(lx - 10, ly - 6, 20, 15, 3); ctx.fill();
+      ctx.fillStyle = '#d4dae3'; ctx.font = '800 12px Nunito, system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('+1', lx, ly + 26);
+    }
+  }
+
+  // parked buses (with bump / shake)
+  const parked = S.buses.filter(b => b.state === 'park');
+  for (const b of parked) {
+    const p = parkPose(b);
+    let x = p.x, y = p.y;
+    if (b.bump) {
+      const v = DIR_VEC[b.dir], k = Math.sin(Math.PI * b.bump.t / b.bump.dur);
+      x += v[0] * b.bump.dist * k; y += v[1] * b.bump.dist * k;
+    }
+    if (b.shake > 0) { const a = Math.sin(now / 22) * 3 * (b.shake / 0.4); x += a; }
+    drawBus(x, y, p.ang, p.len, p.wid, b.color, {});
+  }
+  // buses in slots
+  for (const b of S.buses) if (b.state === 'slot') {
+    const s = slotCenter(b.slot), d = slotDims(b);
+    let x = s.x; if (b.shake > 0) x += Math.sin(now / 22) * 3;
+    drawBus(x, s.y, b.ang, d.len, d.wid, b.color, { seats: true, cap: b.cap, riders: b.riders });
+  }
+  // moving buses on top
+  for (const b of S.buses) if (b.state === 'drive' || b.state === 'leave') {
+    let len, wid;
+    if (b.state === 'drive') {
+      const d = slotDims(b), e = b.k * b.k;
+      len = b.from.len + (d.len - b.from.len) * e; wid = b.from.wid + (d.wid - b.from.wid) * e;
+    } else { const d = slotDims(b); len = d.len; wid = d.wid; }
+    const x = b.state === 'leave' ? slotCenter(b.slot).x : b.x;
+    drawBus(x, b.y, b.ang, len, wid, b.color, b.state === 'leave' ? { seats: true, cap: b.cap, riders: b.riders } : {});
+  }
+
+  // queue
+  const sp = queueSpacing(), ps = sp * 0.42;
+  const maxShown = Math.floor((W - 60) / sp);
+  const n = Math.min(S.queue.length, maxShown);
+  for (let i = n - 1; i >= 0; i--) {
+    const lift = i === 0 ? Math.abs(Math.sin(now / 160)) * 3 : 0;
+    drawPerson(queueX(i), L.qY, ps, S.queue[i], lift);
+  }
+  if (S.queue.length > n) {
+    ctx.fillStyle = '#4a5b70'; ctx.font = '800 13px Nunito, system-ui, sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText('+' + (S.queue.length - n), W - 10, L.qY + 4);
+  }
+  // flying passengers
+  for (const f of S.flying) {
+    const s = slotCenter(f.to.slot), k = Math.min(1, f.t / f.dur);
+    const x = f.x0 + (s.x - f.x0) * k, y = f.y0 + (s.y - f.y0) * k - Math.sin(Math.PI * k) * 26;
+    drawPerson(x, y, ps * (1 - 0.35 * k), f.color, 0);
+  }
+  // progress
+  const done = S.total - S.queue.length;
+  const bw = W - 20, bx = 10, by = 4;
+  ctx.fillStyle = 'rgba(29,42,58,.12)'; rr(bx, by, bw, 5, 3); ctx.fill();
+  ctx.fillStyle = '#ff8a1f'; rr(bx, by, Math.max(5, bw * done / S.total), 5, 3); ctx.fill();
+}
+
+// ---------- Loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (S) { update(dt, now); drawScene(now); }
+  requestAnimationFrame(frame);
+}
+
+// ---------- Buttons ----------
+$('restart').onclick = () => { startLevel(S.level); layout(); };
+$('retry').onclick = () => { startLevel(S.level); layout(); };
+$('next').onclick = () => { startLevel(S.level + 1); layout(); };
+function useBonus() {
+  if (S.bonusUsed) return false;
+  S.bonusUsed = true; S.active = MAX_SLOTS; $('bonus').disabled = true;
+  return true;
+}
+$('bonus').onclick = () => { if (useBonus()) toast('Une place de plus !'); };
+$('loseBonus').onclick = () => { if (useBonus()) { S.over = false; $('loseBox').hidden = true; } };
+
+new ResizeObserver(layout).observe(cv);
+startLevel(Math.max(1, load('sdb-level', 1) | 0));
+layout();
+requestAnimationFrame(frame);
+
+// hook for automated tests
+window.__sdb = { get S() { return S; }, tap: id => tap(S.buses[id]), start: l => { startLevel(l); layout(); }, genLevel };
+})();
+</script>

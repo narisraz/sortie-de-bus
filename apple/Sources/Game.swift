@@ -7,6 +7,7 @@ let maxSlots = 5
 let baseSlots = 4
 let colorCount = 8
 let bumpDuration = 0.32
+let dailyLevel = 14
 
 enum Dir {
     case up, down, left, right
@@ -21,6 +22,14 @@ enum Dir {
         }
     }
     var vertical: Bool { self == .up || self == .down }
+    var letter: String {
+        switch self {
+        case .up: return "U"
+        case .down: return "D"
+        case .left: return "L"
+        case .right: return "R"
+        }
+    }
 }
 
 enum BusState { case park, drive, slot, leave, gone }
@@ -50,6 +59,8 @@ final class Bus {
     var riders = 0
     var pending = 0
     var slot = -1
+    var mystery = false
+    var ice = 0
     var shake = 0.0
     var bumpT = -1.0
     var bumpDist = 0.0
@@ -82,6 +93,7 @@ struct Level {
     let buses: [Bus]
     let queue: [Int]
     let solution: [Int]
+    let cones: [Cell]
 }
 
 private func shuffled<T>(_ a: [T], _ rng: inout Rng) -> [T] {
@@ -97,18 +109,26 @@ private func shuffled<T>(_ a: [T], _ rng: inout Rng) -> [T] {
 
 /// Each bus is placed only if its exit path is clear of the buses already placed,
 /// so leaving in reverse placement order always works: every level is solvable.
-func generateLevel(_ level: Int) -> Level {
-    var rng = Rng(level * 9973 + 17)
+func generateLevel(_ level: Int, seed: Int? = nil) -> Level {
+    var rng = Rng(seed ?? (level * 9973 + 17))
     let cols = min(5 + (level - 1) / 3, 8)
     let rows = min(6 + (level - 1) / 2, 10)
     let nColors = min(3 + (level - 1) / 2, colorCount)
-    let win = level < 3 ? 2 : 3
+    let win = level < 3 ? 2 : level < 8 ? 3 : 4
     let longP = min(0.15 + Double(level) * 0.03, 0.4)
     var occ = Array(repeating: Array(repeating: -1, count: cols), count: rows)
+    // Cones block cells and exit paths like a parked bus that never leaves.
+    var cones: [Cell] = []
+    let nCones = level >= 6 ? min(1 + (level - 6) / 4, 4) : 0
+    for _ in 0..<nCones {
+        let r = rng.int(rows)
+        let c = rng.int(cols)
+        if occ[r][c] == -1 { occ[r][c] = -2; cones.append(Cell(r: r, c: c)) }
+    }
     var buses: [Bus] = []
-    let target = rows * cols * 4 / 9
+    let target = level < 5 ? rows * cols * 4 / 9 : rows * cols / 2
     var a = 0
-    while a < 8000 && buses.count < target {
+    while a < 12000 && buses.count < target {
         a += 1
         let len = rng.next() < longP ? 3 : 2
         let vert = rng.next() < 0.62
@@ -126,7 +146,15 @@ func generateLevel(_ level: Int) -> Level {
         b.color = used[(i + rng.int(nColors)) % nColors]
         b.cap = b.len == 3 ? 6 : 4
     }
+    if level >= 4 {
+        let p = min(0.15 + Double(level - 4) * 0.02, 0.35)
+        for b in buses { b.mystery = rng.next() < p }
+    }
     let order = Array(buses.reversed())
+    // A frozen bus needs `ice` departures first; only buses with at least that many before them in the solution.
+    if level >= 9 {
+        for (i, b) in order.enumerated() where i >= 2 && rng.next() < 0.12 { b.ice = min(3, i) }
+    }
     var queue: [Int] = []
     var i = 0
     while i < order.count {
@@ -137,7 +165,7 @@ func generateLevel(_ level: Int) -> Level {
         queue.append(contentsOf: shuffled(group, &rng))
         i += win
     }
-    return Level(rows: rows, cols: cols, buses: buses, queue: queue, solution: order.map { $0.id })
+    return Level(rows: rows, cols: cols, buses: buses, queue: queue, solution: order.map { $0.id }, cones: cones)
 }
 
 final class Flyer {
@@ -181,6 +209,10 @@ struct Pose { let x: Double, y: Double, ang: Double, len: Double, wid: Double }
 
 final class Game {
     private(set) var level = 1
+    private(set) var daily = false
+    private(set) var cones: [Cell] = []
+    private(set) var departed = 0
+    private(set) var misses = 0
     private(set) var rows = 0, cols = 0
     private(set) var buses: [Bus] = []
     private(set) var queue: [Int] = []
@@ -203,13 +235,18 @@ final class Game {
     private(set) var L = Layout()
     private var size = CGSize.zero
     private var lastDate: Date?
+    /// Called once when a level is won (status becomes .won).
+    var onWin: (() -> Void)?
 
     init(level: Int) { start(level) }
 
-    func start(_ lv: Int) {
+    /// Starts level `lv`, or the daily challenge when `dailySeed` is given (generated as level `dailyLevel`).
+    func start(_ lv: Int, dailySeed: Int? = nil) {
         level = lv
-        let g = generateLevel(lv)
-        rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution
+        daily = dailySeed != nil
+        let g = dailySeed.map { generateLevel(dailyLevel, seed: $0) } ?? generateLevel(lv)
+        rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution; cones = g.cones
+        departed = 0; misses = 0
         queue = g.queue; total = g.queue.count
         slots = Array(repeating: nil, count: maxSlots); active = baseSlots; bonusUsed = false
         flying = []; qOff = 0; nextBoard = 0
@@ -265,23 +302,33 @@ final class Game {
 
     func tap(_ b: Bus) {
         if over || b.state != .park || b.bumpT >= 0 { return }
+        if b.ice > departed {
+            let n = b.ice - departed
+            b.shake = 0.4; misses += 1
+            showToast(n == 1 ? "Bus gelé : encore 1 départ" : "Bus gelé : encore \(n) départs")
+            return
+        }
         var occ: [[Bus?]] = Array(repeating: Array(repeating: nil, count: cols), count: rows)
         for o in buses where o.state == .park { for cell in o.cells { occ[cell.r][cell.c] = o } }
         var free = 0
+        var blocked = false
         var blocker: Bus?
         for cell in b.path(rows: rows, cols: cols) {
-            if let o = occ[cell.r][cell.c] { blocker = o; break }
+            if cones.contains(cell) { blocked = true; break }
+            if let o = occ[cell.r][cell.c] { blocker = o; blocked = true; break }
             free += 1
         }
-        if let blocker {
+        if blocked {
             b.bumpT = 0; b.bumpDist = Double(free) * L.cs + L.cs * 0.1
-            blocker.shake = 0.47
+            blocker?.shake = 0.47
+            misses += 1
             return
         }
         guard let j = (0..<active).first(where: { slots[$0] == nil }) else {
-            b.shake = 0.4; showToast("Toutes les places sont prises"); return
+            b.shake = 0.4; misses += 1; showToast("Toutes les places sont prises"); return
         }
         slots[j] = b; b.slot = j
+        b.mystery = false; departed += 1
         let p = parkPose(b)
         b.x = p.x; b.y = p.y; b.ang = p.ang; b.state = .drive; b.k = 0
         b.fromLen = p.len; b.fromWid = p.wid
@@ -318,6 +365,7 @@ final class Game {
         let dt = min(0.05, max(0, dtIn))
         time += dt
         if toast != nil && time > toastUntil { toast = nil }
+        revealMysteries()
         qOff *= pow(0.0001, dt)
         if abs(qOff) < 0.2 { qOff = 0 }
         for b in buses {
@@ -367,8 +415,31 @@ final class Game {
         checkEnd()
         if endDelay >= 0 {
             endDelay -= dt
-            if endDelay < 0 { status = pendingStatus }
+            if endDelay < 0 {
+                status = pendingStatus
+                if status == .won { onWin?() }
+            }
         }
+    }
+
+    /// A mystery bus shows its colour once nothing stands in its way.
+    private func revealMysteries() {
+        if !buses.contains(where: { $0.mystery && $0.state == .park }) { return }
+        var busy = Array(repeating: Array(repeating: false, count: cols), count: rows)
+        for o in buses where o.state == .park { for cell in o.cells { busy[cell.r][cell.c] = true } }
+        for cell in cones { busy[cell.r][cell.c] = true }
+        for b in buses where b.mystery && b.state == .park {
+            if !b.path(rows: rows, cols: cols).contains(where: { busy[$0.r][$0.c] }) { b.mystery = false }
+        }
+    }
+
+    /// 3 stars, minus one at 2 misses, one at 5 misses and one if the extra slot was used; at least 1.
+    var stars: Int {
+        var s = 3
+        if misses >= 2 { s -= 1 }
+        if misses >= 5 { s -= 1 }
+        if bonusUsed { s -= 1 }
+        return max(1, s)
     }
 
     private func checkEnd() {

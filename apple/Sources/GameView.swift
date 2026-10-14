@@ -29,9 +29,20 @@ private let inkSoft = Color(hex: 0x4A5B70)
 private let accent = Color(hex: 0xFF8A1F)
 private let accentInk = Color(hex: 0x5A2A00)
 
+private let mysteryColor = BusColor(c: Color(hex: 0x8D96A3), d: Color(hex: 0x5F6875), l: Color(hex: 0xB7BFCA))
+
+/// Today's challenge seed: the local date as yyyymmdd (e.g. 20261014).
+private func dailySeed() -> Int {
+    let d = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+    return d.year! * 10000 + d.month! * 100 + d.day!
+}
+
+private func starsText(_ n: Int) -> String { String(repeating: "★", count: n) + String(repeating: "☆", count: 3 - n) }
+
 struct GameView: View {
     @AppStorage("level") private var savedLevel = 1
     @State private var game: Game?
+    @State private var starsTotal = 0
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -42,13 +53,38 @@ struct GameView: View {
                 }
             }
         }
-        .onAppear { if game == nil { game = Game(level: max(1, savedLevel)) } }
+        .onAppear {
+            if game == nil {
+                let g = Game(level: max(1, savedLevel))
+                g.onWin = { [weak g] in DispatchQueue.main.async { if let g { recordWin(g) } } }
+                game = g
+                starsTotal = computeStarsTotal()
+            }
+        }
     }
 
-    private func go(_ game: Game, _ level: Int) {
-        game.start(level)
-        savedLevel = level
+    private func go(_ game: Game, _ level: Int) { game.start(level) }
+
+    private func restart(_ game: Game) {
+        if game.daily { game.start(game.level, dailySeed: dailySeed()) } else { game.start(game.level) }
     }
+
+    /// Best stars per level live in UserDefaults (the AppStorage store) as "stars_N".
+    private func recordWin(_ game: Game) {
+        if game.daily { return }
+        savedLevel = game.level + 1
+        let key = "stars_\(game.level)"
+        let d = UserDefaults.standard
+        if game.stars > d.integer(forKey: key) { d.set(game.stars, forKey: key) }
+        starsTotal = computeStarsTotal()
+    }
+
+    private func computeStarsTotal() -> Int {
+        let d = UserDefaults.standard
+        return d.dictionaryRepresentation().keys.filter { $0.hasPrefix("stars_") }.reduce(0) { $0 + d.integer(forKey: $1) }
+    }
+
+    private func misses(_ n: Int) -> String { n == 0 ? "aucun coup raté" : n == 1 ? "1 coup raté" : "\(n) coups ratés" }
 
     private func lostActions(_ game: Game) -> [(String, () -> Void)] {
         var acts: [(String, () -> Void)] = []
@@ -61,15 +97,19 @@ struct GameView: View {
     private func content(_ game: Game, _ date: Date) -> some View {
         VStack(spacing: 8) {
             HStack {
-                HudButton(label: "↻", primary: false) { go(game, game.level) }
+                HudButton(label: "↻", primary: false) { restart(game) }
                 VStack(spacing: 0) {
-                    Text("SORTIE DE BUS").font(.system(size: 11, weight: .heavy, design: .rounded))
-                        .tracking(1).foregroundStyle(inkSoft)
-                    Text("Niveau \(game.level)").font(.system(size: 26, weight: .heavy, design: .rounded))
-                        .foregroundStyle(ink)
+                    Text("SORTIE DE BUS · ★ \(starsTotal)").font(.system(size: 11, weight: .heavy, design: .rounded))
+                        .tracking(1).foregroundStyle(inkSoft).lineLimit(1)
+                    Text(game.daily ? "Défi du jour" : "Niveau \(game.level)")
+                        .font(.system(size: 24, weight: .heavy, design: .rounded))
+                        .foregroundStyle(ink).lineLimit(1).minimumScaleFactor(0.6)
                 }
                 .frame(maxWidth: .infinity)
-                HudButton(label: "+1 place", primary: true) { _ = game.useBonus() }
+                HudButton(label: game.daily ? "Niveaux" : "Défi", primary: false) {
+                    if game.daily { go(game, max(1, savedLevel)) } else { game.start(game.level, dailySeed: dailySeed()) }
+                }
+                HudButton(label: "+1", primary: true) { _ = game.useBonus() }
                     .disabled(game.bonusUsed).opacity(game.bonusUsed ? 0.45 : 1)
             }
             ZStack {
@@ -88,9 +128,10 @@ struct GameView: View {
                 }
                 switch game.status {
                 case .won:
-                    Overlay(title: "Bravo !",
-                            text: "\(game.total) passagers transportés en \(game.elapsedSeconds) s.",
-                            actions: [("Niveau suivant", { go(game, game.level + 1) })])
+                    Overlay(title: "Bravo !", stars: game.stars,
+                            text: "\(game.total) passagers en \(game.elapsedSeconds) s, \(misses(game.misses)).",
+                            actions: [game.daily ? ("Retour aux niveaux", { go(game, max(1, savedLevel)) })
+                                                 : ("Niveau suivant", { go(game, game.level + 1) })])
                 case .lost:
                     Overlay(title: "Bouchon !",
                             text: "Plus de place libre et aucun bus pour le prochain passager.",
@@ -126,6 +167,7 @@ private struct HudButton: View {
 
 private struct Overlay: View {
     let title: String
+    var stars: Int? = nil
     let text: String
     let actions: [(String, () -> Void)]
     var body: some View {
@@ -133,6 +175,9 @@ private struct Overlay: View {
             Color(hex: 0x142337, alpha: 0.55)
             VStack(spacing: 12) {
                 Text(title).font(.system(size: 32, weight: .heavy, design: .rounded)).foregroundStyle(ink)
+                if let stars {
+                    Text(starsText(stars)).font(.system(size: 30, weight: .heavy)).tracking(4).foregroundStyle(accent)
+                }
                 Text(text).multilineTextAlignment(.center).foregroundStyle(inkSoft)
                 ForEach(Array(actions.enumerated()), id: \.offset) { i, a in
                     Button(action: a.1) {
@@ -164,8 +209,8 @@ private func circle(_ ctx: GraphicsContext, _ color: Color, _ x: Double, _ y: Do
 }
 
 private func drawBus(_ base: GraphicsContext, x: Double, y: Double, ang: Double, len: Double, wid: Double,
-                     color: Int, seats: Bool, cap: Int = 0, riders: Int = 0) {
-    let p = palette[color]
+                     color: Int, seats: Bool, cap: Int = 0, riders: Int = 0, mystery: Bool = false, frozen: Int = 0) {
+    let p = mystery ? mysteryColor : palette[color]
     var ctx = base
     ctx.translateBy(x: x, y: y)
     ctx.rotate(by: .radians(ang))
@@ -208,8 +253,53 @@ private func drawBus(_ base: GraphicsContext, x: Double, y: Double, ang: Double,
         path.closeSubpath()
         ctx.fill(path, with: .color(.white))
     }
-    rr(ctx, Color(hex: 0xFFF6C2), -wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05, 0)
-    rr(ctx, Color(hex: 0xFFF6C2), wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05, 0)
+    // Badges at the back of the bus are drawn upright whatever the bus direction.
+    func upright(_ by: Double) -> CGPoint { CGPoint(x: x - by * sin(ang), y: y + by * cos(ang)) }
+    if frozen > 0 {
+        rr(ctx, Color(hex: 0xC8ECFF, alpha: 0.45), -wid / 2, -len / 2, wid, len, r)
+        var flake = Path()
+        let fl = wid * 0.22
+        for k in 0..<3 {
+            let a = Double(k) * .pi / 3
+            flake.move(to: CGPoint(x: -fl * sin(a), y: -fl * cos(a)))
+            flake.addLine(to: CGPoint(x: fl * sin(a), y: fl * cos(a)))
+        }
+        ctx.stroke(flake, with: .color(.white), style: StrokeStyle(lineWidth: max(1.5, wid * 0.06), lineCap: .round))
+        let c = upright(len / 2 - wid * 0.3)
+        circle(base, Color(hex: 0x1D6FA5), c.x, c.y, wid * 0.21)
+        base.draw(Text("\(frozen)").font(.system(size: wid * 0.28, weight: .heavy, design: .rounded)).foregroundColor(.white), at: c)
+    } else {
+        rr(ctx, Color(hex: 0xFFF6C2), -wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05, 0)
+        rr(ctx, Color(hex: 0xFFF6C2), wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05, 0)
+    }
+    if mystery {
+        let c = upright(len / 2 - wid * 0.32)
+        base.draw(Text("?").font(.system(size: wid * 0.36, weight: .heavy, design: .rounded)).foregroundColor(.white), at: c)
+    }
+}
+
+private func drawCone(_ ctx: GraphicsContext, _ cx: Double, _ cy: Double, _ cs: Double) {
+    let h = cs * 0.34, top = cy - h / 2, bot = cy + h / 2
+    ctx.fill(Path(ellipseIn: CGRect(x: cx - cs * 0.19, y: bot - cs * 0.04, width: cs * 0.38, height: cs * 0.1)),
+             with: .color(Color(hex: 0x0F1928, alpha: 0.25)))
+    rr(ctx, Color(hex: 0x3A4250), cx - cs * 0.16, bot - cs * 0.05, cs * 0.32, cs * 0.05, cs * 0.015)
+    let hw = cs * 0.12
+    var tri = Path()
+    tri.move(to: CGPoint(x: cx - cs * 0.02, y: top))
+    tri.addLine(to: CGPoint(x: cx + cs * 0.02, y: top))
+    tri.addLine(to: CGPoint(x: cx + hw, y: bot - cs * 0.05))
+    tri.addLine(to: CGPoint(x: cx - hw, y: bot - cs * 0.05))
+    tri.closeSubpath()
+    ctx.fill(tri, with: .color(Color(hex: 0xFF7A1A)))
+    // white band across the middle of the cone
+    let y0 = top + h * 0.38, y1 = top + h * 0.56
+    let w0 = cs * 0.02 + (hw - cs * 0.02) * (y0 - top) / (h - cs * 0.05)
+    let w1 = cs * 0.02 + (hw - cs * 0.02) * (y1 - top) / (h - cs * 0.05)
+    var band = Path()
+    band.move(to: CGPoint(x: cx - w0, y: y0)); band.addLine(to: CGPoint(x: cx + w0, y: y0))
+    band.addLine(to: CGPoint(x: cx + w1, y: y1)); band.addLine(to: CGPoint(x: cx - w1, y: y1))
+    band.closeSubpath()
+    ctx.fill(band, with: .color(.white))
 }
 
 private func drawPerson(_ ctx: GraphicsContext, x: Double, y yIn: Double, s: Double, color: Int, lift: Double) {
@@ -269,10 +359,15 @@ private func drawGame(_ ctx: GraphicsContext, _ g: Game) {
                      at: CGPoint(x: s.x, y: s.y + 22))
         }
     }
+    // cones
+    for cone in g.cones {
+        drawCone(ctx, L.gx0 + (Double(cone.c) + 0.5) * L.cs, L.gy0 + (Double(cone.r) + 0.5) * L.cs, L.cs)
+    }
     // parked buses
     for b in g.buses where b.state == .park {
         let p = g.parkPose(b), o = g.parkOffset(b)
-        drawBus(ctx, x: p.x + o.x, y: p.y + o.y, ang: p.ang, len: p.len, wid: p.wid, color: b.color, seats: false)
+        drawBus(ctx, x: p.x + o.x, y: p.y + o.y, ang: p.ang, len: p.len, wid: p.wid, color: b.color, seats: false,
+                mystery: b.mystery, frozen: max(0, b.ice - g.departed))
     }
     // buses waiting in slots
     for b in g.buses where b.state == .slot {

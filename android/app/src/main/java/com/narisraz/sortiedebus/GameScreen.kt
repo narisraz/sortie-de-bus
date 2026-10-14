@@ -6,19 +6,24 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.content.SharedPreferences
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,10 +75,38 @@ private val Ink = Color(0xFF1D2A3A)
 private val InkSoft = Color(0xFF4A5B70)
 private val Accent = Color(0xFFFF8A1F)
 private val AccentInk = Color(0xFF5A2A00)
+private val MYSTERY = BusColor(Color(0xFF8D96A3), Color(0xFF5F6875), Color(0xFFB7BFCA))
+
+/** Today's challenge seed: the local date as yyyymmdd (e.g. 20261014). */
+private fun dailySeed(): Int {
+    val d = java.time.LocalDate.now()
+    return d.year * 10000 + d.monthValue * 100 + d.dayOfMonth
+}
+
+private fun starsText(n: Int) = "★".repeat(n) + "☆".repeat(3 - n)
+
+private fun missesText(n: Int) = when (n) { 0 -> "aucun coup raté"; 1 -> "1 coup raté"; else -> "$n coups ratés" }
+
+/** Best stars per level are stored as "stars_N"; the total is shown in the HUD. */
+private fun starsTotal(prefs: SharedPreferences) =
+    prefs.all.filterKeys { it.startsWith("stars_") }.values.sumOf { (it as? Int) ?: 0 }
 
 @Composable
-fun GameScreen(startLevel: Int, onLevel: (Int) -> Unit) {
-    val game = remember { Game(startLevel) }
+fun GameScreen(prefs: SharedPreferences) {
+    fun savedLevel() = prefs.getInt("level", 1).coerceAtLeast(1)
+    var total by remember { mutableIntStateOf(starsTotal(prefs)) }
+    val game = remember {
+        Game(savedLevel()).also { g ->
+            g.onWin = {
+                if (!g.daily) {
+                    val key = "stars_${g.level}"
+                    val best = max(prefs.getInt(key, 0), g.stars())
+                    prefs.edit().putInt("level", g.level + 1).putInt(key, best).apply()
+                    total = starsTotal(prefs)
+                }
+            }
+        }
+    }
     var tick by remember { mutableLongStateOf(0L) }
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current.density
@@ -90,7 +123,8 @@ fun GameScreen(startLevel: Int, onLevel: (Int) -> Unit) {
     }
     @Suppress("UNUSED_VARIABLE") val frame = tick // recompose HUD and overlays every frame
 
-    fun go(level: Int) { game.start(level); onLevel(level) }
+    fun go(level: Int) = game.start(level)
+    fun restart() = if (game.daily) game.start(game.level, dailySeed()) else game.start(game.level)
 
     Box(Modifier.fillMaxSize().background(Sky), contentAlignment = Alignment.TopCenter) {
         Column(
@@ -99,12 +133,19 @@ fun GameScreen(startLevel: Int, onLevel: (Int) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                HudButton("↻", primary = false) { go(game.level) }
+                HudButton("↻", primary = false) { restart() }
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("SORTIE DE BUS", color = InkSoft, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
-                    Text("Niveau ${game.level}", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("SORTIE DE BUS · ★ $total", color = InkSoft, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp, maxLines = 1)
+                    Text(
+                        if (game.daily) "Défi du jour" else "Niveau ${game.level}",
+                        color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false,
+                    )
                 }
-                HudButton("+1 place", primary = true, enabled = !game.bonusUsed) { game.useBonus() }
+                HudButton(if (game.daily) "Niveaux" else "Défi", primary = false) {
+                    if (game.daily) go(savedLevel()) else game.start(game.level, dailySeed())
+                }
+                Spacer(Modifier.width(6.dp))
+                HudButton("+1", primary = true, enabled = !game.bonusUsed) { game.useBonus() }
             }
             Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(22.dp))) {
                 Canvas(
@@ -126,8 +167,9 @@ fun GameScreen(startLevel: Int, onLevel: (Int) -> Unit) {
                 }
                 when (game.status) {
                     Status.WON -> Overlay(
-                        "Bravo !", "${game.total} passagers transportés en ${game.elapsedSeconds()} s.",
-                        listOf("Niveau suivant" to { go(game.level + 1) }),
+                        "Bravo !", "${game.total} passagers en ${game.elapsedSeconds()} s, ${missesText(game.misses)}.",
+                        listOf(if (game.daily) "Retour aux niveaux" to { go(savedLevel()) } else "Niveau suivant" to { go(game.level + 1) }),
+                        stars = game.stars(),
                     )
                     Status.LOST -> Overlay(
                         "Bouchon !", "Plus de place libre et aucun bus pour le prochain passager.",
@@ -147,6 +189,7 @@ fun GameScreen(startLevel: Int, onLevel: (Int) -> Unit) {
 private fun HudButton(label: String, primary: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     Button(
         onClick = onClick, enabled = enabled, shape = RoundedCornerShape(14.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = if (primary) Accent else Color.White,
             contentColor = if (primary) AccentInk else Ink,
@@ -155,7 +198,7 @@ private fun HudButton(label: String, primary: Boolean, enabled: Boolean = true, 
 }
 
 @Composable
-private fun Overlay(title: String, text: String, actions: List<Pair<String, () -> Unit>>) {
+private fun Overlay(title: String, text: String, actions: List<Pair<String, () -> Unit>>, stars: Int? = null) {
     Box(Modifier.fillMaxSize().background(Color(0x8C142337)), contentAlignment = Alignment.Center) {
         Column(
             Modifier.widthIn(max = 300.dp).background(Color.White, RoundedCornerShape(22.dp)).padding(22.dp),
@@ -163,6 +206,7 @@ private fun Overlay(title: String, text: String, actions: List<Pair<String, () -
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(title, color = Ink, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+            if (stars != null) Text(starsText(stars), color = Accent, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 4.sp)
             Text(text, color = InkSoft, textAlign = TextAlign.Center)
             actions.forEachIndexed { i, (label, action) ->
                 Button(
@@ -187,8 +231,11 @@ private fun DrawScope.rr(color: Color, x: Double, y: Double, w: Double, h: Doubl
 private fun DrawScope.circle(color: Color, x: Double, y: Double, r: Double) =
     drawCircle(color, r.toFloat(), Offset(x.toFloat(), y.toFloat()))
 
-private fun DrawScope.drawBus(x: Double, y: Double, ang: Double, len: Double, wid: Double, col: Int, seats: Boolean, cap: Int, riders: Int) {
-    val p = COLORS[col]
+private fun DrawScope.drawBus(
+    x: Double, y: Double, ang: Double, len: Double, wid: Double, col: Int, seats: Boolean, cap: Int, riders: Int,
+    m: TextMeasurer? = null, mystery: Boolean = false, frozen: Int = 0,
+) {
+    val p = if (mystery) MYSTERY else COLORS[col]
     withTransform({
         translate(x.toFloat(), y.toFloat())
         rotate((ang * 180 / PI).toFloat(), pivot = Offset.Zero)
@@ -235,9 +282,53 @@ private fun DrawScope.drawBus(x: Double, y: Double, ang: Double, len: Double, wi
             }
             drawPath(path, Color.White)
         }
-        rr(Color(0xFFFFF6C2), -wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05, 0.0)
-        rr(Color(0xFFFFF6C2), wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05, 0.0)
+        if (frozen > 0) {
+            rr(Color(0x73C8ECFF), -wid / 2, -len / 2, wid, len, r)
+            val fl = wid * 0.22
+            for (k in 0 until 3) {
+                val a = k * PI / 3
+                drawLine(
+                    Color.White, Offset((-fl * sin(a)).toFloat(), (-fl * kotlin.math.cos(a)).toFloat()),
+                    Offset((fl * sin(a)).toFloat(), (fl * kotlin.math.cos(a)).toFloat()),
+                    max(1.5, wid * 0.06).toFloat(), StrokeCap.Round,
+                )
+            }
+        } else {
+            rr(Color(0xFFFFF6C2), -wid / 2 + wid * 0.1, -len / 2 + 1, wid * 0.14, wid * 0.05, 0.0)
+            rr(Color(0xFFFFF6C2), wid / 2 - wid * 0.24, -len / 2 + 1, wid * 0.14, wid * 0.05, 0.0)
+        }
     }
+    // Badges at the back of the bus are drawn upright whatever the bus direction.
+    fun upright(by: Double) = Pair(x - by * sin(ang), y + by * kotlin.math.cos(ang))
+    if (m == null) return
+    if (frozen > 0) {
+        val (cx, cy) = upright(len / 2 - wid * 0.3)
+        circle(Color(0xFF1D6FA5), cx, cy, wid * 0.21)
+        centered(m, "$frozen", cx, cy, Color.White, wid * 0.28)
+    }
+    if (mystery) {
+        val (cx, cy) = upright(len / 2 - wid * 0.32)
+        centered(m, "?", cx, cy, Color.White, wid * 0.36)
+    }
+}
+
+private fun DrawScope.drawCone(cx: Double, cy: Double, cs: Double) {
+    val h = cs * 0.34; val top = cy - h / 2; val bot = cy + h / 2
+    drawOval(
+        Color(0x400F1928), Offset((cx - cs * 0.19).toFloat(), (bot - cs * 0.04).toFloat()),
+        Size((cs * 0.38).toFloat(), (cs * 0.1).toFloat()),
+    )
+    rr(Color(0xFF3A4250), cx - cs * 0.16, bot - cs * 0.05, cs * 0.32, cs * 0.05, cs * 0.015)
+    val hw = cs * 0.12; val tip = cs * 0.02; val baseY = bot - cs * 0.05
+    fun halfW(yy: Double) = tip + (hw - tip) * (yy - top) / (baseY - top)
+    fun quad(y0: Double, w0: Double, y1: Double, w1: Double) = Path().apply {
+        moveTo((cx - w0).toFloat(), y0.toFloat()); lineTo((cx + w0).toFloat(), y0.toFloat())
+        lineTo((cx + w1).toFloat(), y1.toFloat()); lineTo((cx - w1).toFloat(), y1.toFloat()); close()
+    }
+    drawPath(quad(top, tip, baseY, hw), Color(0xFFFF7A1A))
+    // white band across the middle of the cone
+    val y0 = top + h * 0.38; val y1 = top + h * 0.56
+    drawPath(quad(y0, halfW(y0), y1, halfW(y1)), Color.White)
 }
 
 private fun DrawScope.drawPerson(x: Double, yIn: Double, s: Double, col: Int, lift: Double) {
@@ -305,11 +396,13 @@ private fun DrawScope.drawGame(g: Game, measurer: TextMeasurer) {
             label(measurer, "+1", s.x, s.y + 18, lock, 12, center = true)
         }
     }
+    // cones
+    for ((r, c) in g.cones) drawCone(L.gx0 + (c + 0.5) * L.cs, L.gy0 + (r + 0.5) * L.cs, L.cs)
     // parked buses
     for (b in g.buses) if (b.state == BusState.PARK) {
         val p = g.parkPose(b)
         val o = g.parkOffset(b)
-        drawBus(p.x + o.x, p.y + o.y, p.ang, p.len, p.wid, b.color, false, 0, 0)
+        drawBus(p.x + o.x, p.y + o.y, p.ang, p.len, p.wid, b.color, false, 0, 0, measurer, b.mystery, max(0, b.ice - g.departed))
     }
     // buses waiting in slots
     for (b in g.buses) if (b.state == BusState.SLOT) {
@@ -349,6 +442,11 @@ private fun DrawScope.drawGame(g: Game, measurer: TextMeasurer) {
     val bw = W - 20
     rr(Color(0x1F1D2A3A), 10.0, 4.0, bw, 5.0, 3.0)
     rr(Accent, 10.0, 4.0, max(5.0, bw * done / max(1, g.total)), 5.0, 3.0)
+}
+
+private fun DrawScope.centered(m: TextMeasurer, text: String, x: Double, y: Double, color: Color, size: Double) {
+    val res = m.measure(text, TextStyle(color = color, fontSize = (size / density / fontScale).toFloat().sp, fontWeight = FontWeight.ExtraBold))
+    drawText(res, topLeft = Offset((x - res.size.width / 2.0).toFloat(), (y - res.size.height / 2.0).toFloat()))
 }
 
 private fun DrawScope.label(m: TextMeasurer, text: String, x: Double, y: Double, color: Color, size: Int, center: Boolean) {

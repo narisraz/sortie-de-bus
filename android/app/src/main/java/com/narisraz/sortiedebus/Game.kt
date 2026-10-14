@@ -43,6 +43,8 @@ class Bus(val id: Int, val r: Int, val c: Int, val len: Int, val dir: Dir) {
     var riders = 0
     var pending = 0
     var slot = -1
+    var mystery = false
+    var ice = 0
     var shake = 0.0
     var bumpT = -1.0
     var bumpDist = 0.0
@@ -61,10 +63,11 @@ class Bus(val id: Int, val r: Int, val c: Int, val len: Int, val dir: Dir) {
     }
 }
 
-class Level(val rows: Int, val cols: Int, val buses: List<Bus>, val queue: List<Int>, val solution: List<Int>)
+class Level(val rows: Int, val cols: Int, val buses: List<Bus>, val queue: List<Int>, val solution: List<Int>, val cones: List<Pair<Int, Int>>)
 
 const val COLOR_COUNT = 8
 const val BUMP_DUR = 0.32
+const val DAILY_LEVEL = 14
 
 private fun <T> MutableList<T>.shuffleWith(rng: Rng): MutableList<T> {
     for (i in size - 1 downTo 1) {
@@ -76,18 +79,26 @@ private fun <T> MutableList<T>.shuffleWith(rng: Rng): MutableList<T> {
 
 // Each bus is placed only if its exit path is clear of the buses already placed,
 // so leaving in reverse placement order always works: every level is solvable.
-fun generateLevel(level: Int): Level {
-    val rng = Rng(level * 9973 + 17)
+fun generateLevel(level: Int, seed: Int? = null): Level {
+    val rng = Rng(seed ?: (level * 9973 + 17))
     val cols = min(5 + (level - 1) / 3, 8)
     val rows = min(6 + (level - 1) / 2, 10)
     val nColors = min(3 + (level - 1) / 2, COLOR_COUNT)
-    val win = if (level < 3) 2 else 3
+    val win = if (level < 3) 2 else if (level < 8) 3 else 4
     val longP = min(0.15 + level * 0.03, 0.4)
     val occ = Array(rows) { IntArray(cols) { -1 } }
+    // Cones block cells and exit paths like a parked bus that never leaves.
+    val cones = mutableListOf<Pair<Int, Int>>()
+    val nCones = if (level >= 6) min(1 + (level - 6) / 4, 4) else 0
+    repeat(nCones) {
+        val r = rng.int(rows)
+        val c = rng.int(cols)
+        if (occ[r][c] == -1) { occ[r][c] = -2; cones.add(Pair(r, c)) }
+    }
     val buses = mutableListOf<Bus>()
-    val target = rows * cols * 4 / 9
+    val target = if (level < 5) rows * cols * 4 / 9 else rows * cols / 2
     var a = 0
-    while (a < 8000 && buses.size < target) {
+    while (a < 12000 && buses.size < target) {
         a++
         val len = if (rng.next() < longP) 3 else 2
         val vert = rng.next() < 0.62
@@ -105,7 +116,13 @@ fun generateLevel(level: Int): Level {
         b.color = used[(i + rng.int(nColors)) % nColors]
         b.cap = if (b.len == 3) 6 else 4
     }
+    if (level >= 4) {
+        val p = min(0.15 + (level - 4) * 0.02, 0.35)
+        buses.forEach { b -> b.mystery = rng.next() < p }
+    }
     val order = buses.reversed()
+    // A frozen bus needs `ice` departures first; only buses with at least that many before them in the solution.
+    if (level >= 9) order.forEachIndexed { i, b -> if (i >= 2 && rng.next() < 0.12) b.ice = min(3, i) }
     val queue = mutableListOf<Int>()
     var i = 0
     while (i < order.size) {
@@ -114,7 +131,7 @@ fun generateLevel(level: Int): Level {
         queue.addAll(group.shuffleWith(rng))
         i += win
     }
-    return Level(rows, cols, buses, queue, order.map { it.id })
+    return Level(rows, cols, buses, queue, order.map { it.id }, cones)
 }
 
 class Flyer(val color: Int, val x0: Double, val y0: Double, val to: Bus) {
@@ -153,6 +170,10 @@ class Pose(val x: Double, val y: Double, val ang: Double, val len: Double, val w
 
 class Game(startLevel: Int) {
     var level = startLevel; private set
+    var daily = false; private set
+    var cones: List<Pair<Int, Int>> = emptyList(); private set
+    var departed = 0; private set
+    var misses = 0; private set
     var rows = 0; private set
     var cols = 0; private set
     var buses: List<Bus> = emptyList(); private set
@@ -175,13 +196,18 @@ class Game(startLevel: Int) {
     private var toastUntil = 0.0
     val L = Layout()
     private var sizeW = 0.0; private var sizeH = 0.0
+    /** Called once when a level is won (status becomes WON). */
+    var onWin: (() -> Unit)? = null
 
     init { start(startLevel) }
 
-    fun start(lv: Int) {
+    /** Starts level [lv], or the daily challenge when [dailySeed] is given (generated as level DAILY_LEVEL). */
+    fun start(lv: Int, dailySeed: Int? = null) {
         level = lv
-        val g = generateLevel(lv)
-        rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution
+        daily = dailySeed != null
+        val g = if (dailySeed != null) generateLevel(DAILY_LEVEL, dailySeed) else generateLevel(lv)
+        rows = g.rows; cols = g.cols; buses = g.buses; solution = g.solution; cones = g.cones
+        departed = 0; misses = 0
         queue.clear(); queue.addAll(g.queue); total = g.queue.size
         slots.fill(null); active = BASE_SLOTS; bonusUsed = false
         flying.clear(); qOff = 0.0; nextBoard = 0.0
@@ -230,23 +256,35 @@ class Game(startLevel: Int) {
 
     fun tap(b: Bus) {
         if (over || b.state != BusState.PARK || b.bumpT >= 0) return
+        if (b.ice > departed) {
+            val n = b.ice - departed
+            b.shake = 0.4; misses++
+            showToast(if (n == 1) "Bus gelé : encore 1 départ" else "Bus gelé : encore $n départs")
+            return
+        }
         val occ = Array(rows) { arrayOfNulls<Bus>(cols) }
         buses.filter { it.state == BusState.PARK }.forEach { o -> o.cells().forEach { (y, x) -> occ[y][x] = o } }
+        val coneAt = Array(rows) { BooleanArray(cols) }
+        cones.forEach { (y, x) -> coneAt[y][x] = true }
         var free = 0
+        var blocked = false
         var blocker: Bus? = null
         for ((y, x) in b.path(rows, cols)) {
+            if (coneAt[y][x]) { blocked = true; break }
             val o = occ[y][x]
-            if (o != null) { blocker = o; break }
+            if (o != null) { blocker = o; blocked = true; break }
             free++
         }
-        if (blocker != null) {
+        if (blocked) {
             b.bumpT = 0.0; b.bumpDist = free * L.cs + L.cs * 0.1
-            blocker.shake = 0.47 // starts after a short delay, see update()
+            blocker?.shake = 0.47 // starts after a short delay, see update()
+            misses++
             return
         }
         val j = (0 until active).firstOrNull { slots[it] == null }
-        if (j == null) { b.shake = 0.4; showToast("Toutes les places sont prises"); return }
+        if (j == null) { b.shake = 0.4; misses++; showToast("Toutes les places sont prises"); return }
         slots[j] = b; b.slot = j
+        b.mystery = false; departed++
         val p = parkPose(b)
         b.x = p.x; b.y = p.y; b.ang = p.ang; b.state = BusState.DRIVE; b.k = 0.0
         b.fromLen = p.len; b.fromWid = p.wid
@@ -284,6 +322,7 @@ class Game(startLevel: Int) {
         val dt = min(0.05, dtIn)
         time += dt
         if (toast != null && time > toastUntil) toast = null
+        revealMysteries()
         qOff *= 0.0001.pow(dt)
         if (abs(qOff) < 0.2) qOff = 0.0
         for (b in buses) {
@@ -335,8 +374,29 @@ class Game(startLevel: Int) {
         checkEnd()
         if (endDelay >= 0) {
             endDelay -= dt
-            if (endDelay < 0) status = pendingStatus
+            if (endDelay < 0) {
+                status = pendingStatus
+                if (status == Status.WON) onWin?.invoke()
+            }
         }
+    }
+
+    // A mystery bus shows its colour once nothing stands in its way.
+    private fun revealMysteries() {
+        if (buses.none { it.mystery && it.state == BusState.PARK }) return
+        val busy = Array(rows) { BooleanArray(cols) }
+        buses.filter { it.state == BusState.PARK }.forEach { o -> o.cells().forEach { (y, x) -> busy[y][x] = true } }
+        cones.forEach { (y, x) -> busy[y][x] = true }
+        for (b in buses) if (b.mystery && b.state == BusState.PARK && b.path(rows, cols).none { (y, x) -> busy[y][x] }) b.mystery = false
+    }
+
+    /** 3 stars, minus one at 2 misses, one at 5 misses and one if the extra slot was used; at least 1. */
+    fun stars(): Int {
+        var s = 3
+        if (misses >= 2) s--
+        if (misses >= 5) s--
+        if (bonusUsed) s--
+        return max(1, s)
     }
 
     private fun checkEnd() {

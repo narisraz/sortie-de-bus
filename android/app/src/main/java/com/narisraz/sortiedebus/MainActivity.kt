@@ -11,10 +11,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val prefs = getSharedPreferences("sortie-de-bus", MODE_PRIVATE)
         setContent {
-            GameScreen(
-                startLevel = prefs.getInt("level", 1).coerceAtLeast(1),
-                onLevel = { prefs.edit().putInt("level", it).apply() },
-            )
+            GameScreen(prefs)
         }
     }
 }
